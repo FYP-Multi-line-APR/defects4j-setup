@@ -11,7 +11,7 @@ def make_dir(clone_pid_path):
         os.makedirs(clone_pid_path) 
 
 def checkout_project(pid, bid):
-    checkout_command = f"{defects4j_path} checkout -p {pid} -v {bid}b -w {cloned_path}/{pid}/{bid}"
+    checkout_command = f"defects4j checkout -p {pid} -v {bid}b -w {cloned_path}/{pid}/{bid}"
     os.system(checkout_command)
 
 def handle_pids(pids_list):
