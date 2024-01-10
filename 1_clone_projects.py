@@ -2,9 +2,6 @@ import os
 import subprocess
 from utils import get_pids_list, get_bids_list
 
-defects4j_path = "~/Work/defects4j/framework/bin/defects4j"
-cloned_path = "./cloned-projects"
-os.environ['PATH'] = defects4j_path + ":" + os.environ['PATH']
 
 def make_dir(clone_pid_path):
     if not os.path.exists(clone_pid_path) or not os.path.isdir(clone_pid_path):
