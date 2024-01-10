@@ -2,7 +2,7 @@ import subprocess
 import json
 import os
 
-defects4j_path = "~/Work/defects4j/framework/bin/defects4j"
+# defects4j = "~/Work/defects4j/framework/bin/defects4j"
 fine_tune_train_data_dir = './fine-tune-train-data'
 train_data_dir = './train-data'
 cloned_dir = './cloned-projects'
@@ -33,12 +33,12 @@ def get_available_bug_count_for_projects_in_cloned_data():
     return result
 
 def get_pids_list():
-    get_pids_command = f"{defects4j_path} pids"
+    get_pids_command = f"defects4j pids"
     output = subprocess.check_output(get_pids_command, shell=True, text=True)
     return output.strip().split('\n')
 
 def get_bids_list(pid):
-    get_bids_command = f"{defects4j_path} bids -p {pid}"
+    get_bids_command = f"defects4j bids -p {pid}"
     output = subprocess.check_output(get_bids_command, shell=True, text=True)
     return output.strip().split('\n')
 
