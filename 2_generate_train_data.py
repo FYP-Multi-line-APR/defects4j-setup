@@ -78,7 +78,7 @@ def process_line(line):
     line = line.strip()
     return line
 
-def generate_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line_no, bug_chunk_lines, file_path):
+def generate_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line_no, bug_chunk_lines, file_path, buggy_end_line):
     buggy_line_no = bug_chunk_start_line_no 
     bug_lines = []
     fix_lines = []
@@ -106,7 +106,7 @@ def generate_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line_no, bug_
     context = generate_context(collected_context_front, collected_context_end, bug)
     
     global generated_train_data_id
-    result = generate_train_data_dict(generated_train_data_id, bug, fix, context, file_path, buggy_line_no)
+    result = generate_train_data_dict(generated_train_data_id, bug, fix, context, file_path, (buggy_line_no,buggy_end_line))
     generated_train_data_id += 1
     return result
 
@@ -122,11 +122,17 @@ def generate_train_data(bug_id, bug_idx):
     curr_line_number = -1
 
     for line_idx in range(len(git_show_result_lines)):
+        # print(curr_line_number)
         line = git_show_result_lines[line_idx]
         if line.startswith("diff --git ") and line.endswith(".java"): 
             file_path = extract_file_path_from(line)
-        elif line.startswith("@@ "):
+        elif line.startswith("@@ "):    
+            
+            if not extract_starting_line_number(line):
+                print(line,curr_line_number)
+                continue
             curr_line_number = extract_starting_line_number(line)
+            
         elif line.startswith("- "):
             bug_chunk_lines.append(line)
             bug_chunk_start_line = curr_line_number if bug_chunk_start_line == -1 else bug_chunk_start_line
@@ -138,7 +144,7 @@ def generate_train_data(bug_id, bug_idx):
             modified_file_path = f"{buggy_dir}/{file_path}"
             is_modified_file_exist = file_path_exists(modified_file_path)
             if file_path != "" and is_modified_file_exist and bug_chunk_lines != [] and bug_chunk_start_line != -1:
-                generated_train_data = generate_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line, bug_chunk_lines, file_path)
+                generated_train_data = generate_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line, bug_chunk_lines, file_path,curr_line_number)
                 train_data.append(generated_train_data)
             curr_line_number += 1
             bug_chunk_lines = []
