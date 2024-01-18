@@ -2,7 +2,7 @@ import subprocess
 import json
 import os
 
-defects4j_path = "~/Work/defects4j/framework/bin/defects4j"
+defects4j_path = "defects4j"
 fine_tune_train_data_dir = './fine-tune-train-data'
 train_data_dir = './train-data'
 cloned_dir = './cloned-projects'

@@ -2,7 +2,7 @@ import os
 import subprocess
 from utils import get_pids_list, get_bids_list
 
-defects4j_path = "~/Work/defects4j/framework/bin/defects4j"
+defects4j_path = "defects4j"
 cloned_path = "./cloned-projects"
 os.environ['PATH'] = defects4j_path + ":" + os.environ['PATH']
 
