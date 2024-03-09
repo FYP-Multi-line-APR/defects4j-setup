@@ -1,7 +1,9 @@
+import sys
 import os 
 import subprocess
 import re
 from utils import make_dir, write_json, get_pids_list, get_bids_list, file_path_exists
+from collect_context import get_context_with_prediction_token_without_comments, get_full_file_context_with_prediction_token_without_comments
 
 cloned_projects_dir_path = './cloned-projects'
 train_data_dir_path = "./train-data"
@@ -10,8 +12,6 @@ file_git_diff = "diff --git "
 java_file_ext = ".java"
 
 generated_train_data_id = 1
-
-context_width = 5
 
 def get_git_show_result():
     return subprocess.check_output("git show", shell=True, text=True)
@@ -39,7 +39,6 @@ def extract_starting_line_number(line):
     return None
 
 def collect_context(bug_id, bug_idx, file_path, lines_range):
-    # print(f"bug id: {bug_id}, bug idx: {bug_idx}")
     os.chdir(f"{cloned_projects_dir_path}/{bug_id}/{bug_idx}")
     try:
         with open(file_path, 'r', encoding='utf-8', errors='replace') as file: 
@@ -52,10 +51,7 @@ def collect_context(bug_id, bug_idx, file_path, lines_range):
     finally:
         os.chdir(f"./../../../")
 
-def generate_context(context_front, context_end, bug):
-    return context_front + ' <BUG> ' + bug + ' </BUG> ' + context_end
-
-def generate_train_data_dict(id, bug, fix, context, file_path, buggy_line_no):
+def generate_train_data_dict(id, bug, fix, contexts, file_path, buggy_line_no):
     return {
         "id": id,
         "file_path": file_path,
@@ -68,6 +64,7 @@ def generate_train_data_dict(id, bug, fix, context, file_path, buggy_line_no):
             {
                 "txt": context
             }
+            for context in contexts
         ]
     }
 
@@ -78,77 +75,103 @@ def process_line(line):
     line = line.strip()
     return line
 
-def generate_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line_no, bug_chunk_lines, file_path, buggy_end_line):
+def generate_large_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line_no, bug_chunk_end_line_no, bug_chunk_lines, file_path):
     buggy_line_no = bug_chunk_start_line_no 
     bug_lines = []
     fix_lines = []
-    context_front = [buggy_line_no - context_width, buggy_line_no]
-    context_end = [buggy_line_no, buggy_line_no + context_width]
-    
+
+    complete_file_path = f"{cloned_projects_dir_path}/{bug_id}/{bug_idx}/{file_path}"
+    collected_contexts = get_full_file_context_with_prediction_token_without_comments(complete_file_path, bug_chunk_start_line_no, bug_chunk_end_line_no)
+    # print(bug_chunk_lines)
     shift_context_end = 0
     for line in bug_chunk_lines:
-        if line.startswith("- "):
+        if line.startswith("-"):
             line = process_line(line)
             fix_lines.append(line)
-        elif line.startswith("+ "):
+        elif line.startswith("+"):
             line = process_line(line)
             bug_lines.append(line)
             shift_context_end += 1
-    context_end = [number + shift_context_end for number in context_end]
-
+    print(f"fix_lines: {fix_lines}")
     if len(fix_lines) == 0:
-        fix_lines.append('[DELETED]')
+        fix_lines.append('[Delete]')
 
     bug = " ".join(bug_lines)
     fix = " ".join(fix_lines)
-    collected_context_front = collect_context(bug_id, bug_idx, file_path, context_front)
-    collected_context_end = collect_context(bug_id, bug_idx, file_path, context_end)
-    context = generate_context(collected_context_front, collected_context_end, bug)
     
     global generated_train_data_id
-    result = generate_train_data_dict(generated_train_data_id, bug, fix, context, file_path, (buggy_line_no,buggy_end_line))
+    result = generate_train_data_dict(generated_train_data_id, bug, fix, collected_contexts, file_path, buggy_line_no)
+    generated_train_data_id += 1
+    return result
+
+def generate_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line_no, bug_chunk_end_line_no, bug_chunk_lines, file_path):
+    buggy_line_no = bug_chunk_start_line_no 
+    bug_lines = []
+    fix_lines = []
+
+    complete_file_path = f"{cloned_projects_dir_path}/{bug_id}/{bug_idx}/{file_path}"
+
+    collected_context = get_context_with_prediction_token_without_comments(complete_file_path, bug_chunk_start_line_no, bug_chunk_end_line_no)
+    print(bug_chunk_lines)
+    shift_context_end = 0
+    for line in bug_chunk_lines:
+        if line.startswith("-"):
+            line = process_line(line)
+            fix_lines.append(line)
+        elif line.startswith("+"):
+            line = process_line(line)
+            bug_lines.append(line)
+            shift_context_end += 1
+    print(f"fix_lines: {fix_lines}")
+    if len(fix_lines) == 0:
+        fix_lines.append('[Delete]')
+
+    bug = " ".join(bug_lines)
+    fix = " ".join(fix_lines)
+ 
+    global generated_train_data_id
+    result = generate_train_data_dict(generated_train_data_id, bug, fix, collected_context, file_path, buggy_line_no)
     generated_train_data_id += 1
     return result
 
 def generate_train_data(bug_id, bug_idx):
     buggy_dir = f"{cloned_projects_dir_path}/{bug_id}/{bug_idx}"
     git_show_result_lines = get_git_show_result_lines(buggy_dir)
-    
     train_data = []
 
     file_path = ""
     bug_chunk_lines = []
     bug_chunk_start_line = -1
+    bug_chunk_end_line = -1
     curr_line_number = -1
 
     for line_idx in range(len(git_show_result_lines)):
-        # print(curr_line_number)
         line = git_show_result_lines[line_idx]
         if line.startswith("diff --git ") and line.endswith(".java"): 
             file_path = extract_file_path_from(line)
-        elif line.startswith("@@ "):    
-            
-            if not extract_starting_line_number(line):
-                print(line,curr_line_number)
-                continue
+        elif line.startswith("@@ "):
             curr_line_number = extract_starting_line_number(line)
-            
-        elif line.startswith("- "):
+        elif line.startswith("-") and not line.startswith("-vid") and not line.startswith("---"):
             bug_chunk_lines.append(line)
             bug_chunk_start_line = curr_line_number if bug_chunk_start_line == -1 else bug_chunk_start_line
-        elif line.startswith("+ "):
+            bug_chunk_end_line = curr_line_number if bug_chunk_end_line == -1 else bug_chunk_end_line
+        elif line.startswith("+") and not line.startswith("+vid") and not line.startswith("+++"):
             bug_chunk_lines.append(line)
             bug_chunk_start_line = curr_line_number if bug_chunk_start_line == -1 else bug_chunk_start_line
+            bug_chunk_end_line = curr_line_number
             curr_line_number += 1
         else:
             modified_file_path = f"{buggy_dir}/{file_path}"
             is_modified_file_exist = file_path_exists(modified_file_path)
-            if file_path != "" and is_modified_file_exist and bug_chunk_lines != [] and bug_chunk_start_line != -1:
-                generated_train_data = generate_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line, bug_chunk_lines, file_path,curr_line_number)
+            if file_path != "" and is_modified_file_exist and bug_chunk_lines != [] and bug_chunk_start_line != -1 and bug_chunk_end_line != -1:
+                print(f"bug_chunk_start_line:{bug_chunk_start_line}, bug_chunk_end_line:{bug_chunk_end_line}")
+                generated_train_data = generate_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line, bug_chunk_end_line, bug_chunk_lines, file_path)
+                # generated_train_data = generate_large_train_data_for_chunk(bug_id, bug_idx, bug_chunk_start_line, bug_chunk_end_line, bug_chunk_lines, file_path)
                 train_data.append(generated_train_data)
             curr_line_number += 1
             bug_chunk_lines = []
             bug_chunk_start_line = -1
+            bug_chunk_end_line = -1
     return train_data
 
 def make_train_data_dir(bug_id):
@@ -160,12 +183,55 @@ def write_train_data(bug_id, bug_idx, train_data):
     write_json(write_file_path, train_data)
 
 if __name__ == "__main__":
-    pids = get_pids_list()
-    for pid in pids:
+    pid = None 
+    bid = None 
+    ff = None
+    try:
+        pid = sys.argv[1]
+        bid = sys.argv[2]
+        ff = sys.argv[3]
+    except:
+        pass 
+
+    if pid is None and bid is None:
+        pids = get_pids_list()
+        for pid in pids:
+            bids = get_bids_list(pid)
+            for bid in bids:
+                try: 
+                    train_data = generate_train_data(pid, bid)
+                    make_train_data_dir(pid)
+                    write_train_data(pid, bid, train_data)
+                except Exception as ex:
+                    print(f"Couldn't generate train data for {pid} {bid}")
+    elif pid is not None and bid is None:
         bids = get_bids_list(pid)
         for bid in bids:
-            train_data = generate_train_data(pid, bid)
-            make_train_data_dir(pid)
-            write_train_data(pid, bid, train_data)
+            try:
+                train_data = generate_train_data(pid, bid)
+                make_train_data_dir(pid)
+                write_train_data(pid, bid, train_data)
+            except Exception as ex:
+                    print(f"Couldn't generate train data for {pid} {bid}")
+    elif pid is not None and bid is not None and ff=='y':
+        bids = get_bids_list(pid)
+        for i in range(int(bid)-1, len(bids)):
+            try:
+                curr_bid = bids[i]
+                train_data = generate_train_data(pid, curr_bid)
+                make_train_data_dir(pid)
+                write_train_data(pid, curr_bid, train_data)
+            except Exception as ex:
+                    print(f"Couldn't generate train data for {pid} {bid}")
+    elif pid is not None and bid is not None:
+        bids = get_bids_list(pid)
+        curr_bid = bids[int(bid)-1]
+        train_data = generate_train_data(pid, curr_bid)
+        make_train_data_dir(pid)
+        write_train_data(pid, curr_bid, train_data)
+    else:
+        train_data = generate_train_data(pid, bid)
+        make_train_data_dir(pid)
+        write_train_data(pid, bid, train_data)
 
 

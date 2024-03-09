@@ -1,1 +1,3 @@
 myenv 
+cloned-projects/*/
+train-data/*/*.json
