@@ -2,12 +2,17 @@ import os
 import json
 import re
 import sys
+import math
+
+from sctokenizer import JavaTokenizer
 
 from utils import get_list_of_dirs_in, get_files_inside_dir, get_json_data, write_json
 from utils import append_to_file, write_to_file
 from transformers import RobertaTokenizer, T5ForConditionalGeneration
-from utils import extract_content_between, bug_token, context_token
+from utils import extract_content_between
 from utils import replace_prediction_token
+from utils import bug_token, context_token, prediction_token
+from utils import txt_field, bug_field
 
 from generate_result_summary import get_file_to_write_path, generate_summary
 
@@ -20,13 +25,6 @@ def do_model_prediction(text):
     generated_ids = model.generate(input_ids, max_length=predict_max_length)
     prediction = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
     return prediction
-
-# def do_model_beam_prediction(text):
-#     global tokenizer, model 
-#     input_ids = tokenizer(text, return_tensors="pt").input_ids
-#     generated_ids = model.generate(input_ids, max_length=predict_max_length, num_beams=beam_size, num_return_sequences=beam_size)
-#     prediction = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-#     return prediction 
 
 def get_prediction_only_from_starcoder_output(output):
     start_index = output.find(fim_middle_token)
@@ -51,6 +49,11 @@ def do_model_beam_predictions(text):
         prediction = get_prediction_only_from_starcoder_output(prediction)
         predictions.append(prediction)
     return predictions 
+
+def update_input_with_curr_prediction(input_text, curr_prediction):
+    bug_part = extract_content_between(input_text, bug_token, context_token)
+    new_context = replace_prediction_token(bug_part, curr_prediction)
+    return f"{bug_token} {bug_part} {context_token} {new_context}"
 
 def replace_bug_context(original_text, replacement_text):
     start_index = original_text.find("[BUG]")
@@ -81,19 +84,20 @@ def process_line_for_compare(code_str):
     return code_str
 
 def is_bug_fixed(original_fix, prediction):
-    processed_original_fix = process_line_for_compare(original_fix)
-    processed_prediction = process_line_for_compare(prediction)
-    if processed_original_fix == processed_prediction:
-        return True
-    else:
-        # print(f"{processed_original_fix} != {processed_prediction}")
-        return False
+    global java_tokenizer
+
+    tokens_fix = java_tokenizer.tokenize(original_fix)
+    tokens_prediction = java_tokenizer.tokenize(prediction)
+
+    comparison_fix_tokens = [token.token_value for token in tokens_fix]
+    comparison_prediction_tokens = [token.token_value for token in tokens_prediction]
+
+    return comparison_fix_tokens == comparison_prediction_tokens
 
 def is_prediction_close(original_fix, prediction):
     processed_original_fix = process_line_for_compare(original_fix)
     processed_prediction = process_line_for_compare(prediction)
     if processed_original_fix in processed_prediction or processed_prediction in processed_original_fix:
-    # if processed_original_fix in processed_prediction:
         return True
     return False
 
@@ -107,6 +111,38 @@ def initiate_list_of_queues_for_iterations():
 def add_predictions_to_queue(queue, predictions):
     for prediction in predictions:
         queue.append(prediction)
+
+def count_prediction_token_in(text):
+    occurrences_count = len(re.findall(prediction_token, text, re.IGNORECASE))
+    return occurrences_count
+
+def get_index_of_buggy_context(contexts):
+    for i in range(len(contexts)):
+        context = contexts[i]
+        if count_prediction_token_in(context[txt_field]) == 1:
+            return i 
+    return -1 
+
+def get_needed_contexts(contexts):
+    global context_limit 
+    buggy_context_index = get_index_of_buggy_context(contexts)
+    needed_contexts = [contexts[buggy_context_index]]
+    for i in range(1, math.ceil(context_limit / 2)):
+        above_surrounding_context_index = buggy_context_index - i 
+        below_surrounding_context_index = buggy_context_index + i 
+        if -1 < above_surrounding_context_index:
+            # print(f"above context: {contexts[above_surrounding_context_index]}")
+            needed_contexts.append(contexts[above_surrounding_context_index])
+        if below_surrounding_context_index < len(contexts):
+            # print(f"below context: {contexts[below_surrounding_context_index]}")
+            needed_contexts.append(contexts[below_surrounding_context_index])
+    return needed_contexts
+
+def format_to_prompt(bug_context_text, bug, current_context_text):
+    if prediction_token in current_context_text:
+        context_with_bug = replace_prediction_token(current_context_text, bug)
+        return f"{bug_token} {bug_context_text} {context_token} {context_with_bug}"
+    return f"{bug_token} {bug_context_text} {context_token} {current_context_text}"
 
 def single_iteration_beam_predict_for_bug_file(result, project, bug, bug_file_path):
     global iterations, bug_count_to_check, number_of_improvements_after_first_iteration
@@ -124,19 +160,29 @@ def single_iteration_beam_predict_for_bug_file(result, project, bug, bug_file_pa
     fix_bug_contents = []
 
     while try_fix_bug_contents:
-        print(f"project: {project}, bug: {bug}")
-        print(f"try_fix_bug_contents: {len(try_fix_bug_contents)}")
-        print(f"fix_bug_contents: {len(fix_bug_contents)}")
-        print(f"not_fix_bug_contents: {len(not_fix_bug_contents)}")
+        # print(f"project: {project}, bug: {bug}")
+        # print(f"try_fix_bug_contents: {len(try_fix_bug_contents)}")
+        # print(f"fix_bug_contents: {len(fix_bug_contents)}")
+        # print(f"not_fix_bug_contents: {len(not_fix_bug_contents)}")
         bug_content = try_fix_bug_contents.pop(0)
         bug_contexts = bug_content['ctxs']
-        next_context = bug_contexts[0]['txt']
-        bug_part = extract_content_between(next_context, bug_token, context_token)
+        bug_text = bug_content[bug_field]
+        needed_contexts = get_needed_contexts(bug_contexts)
+        needed_bug_context_text = needed_contexts[0][txt_field]
+        bug_part = needed_bug_context_text
+        # bug_part = extract_content_between(needed_bug_context_text, bug_token, context_token)
         if take_first_prediction:
             first_predictions = [bug_content['fix']]
             take_first_prediction = False
         else:
-            first_predictions = do_model_beam_predictions(next_context)
+            first_predictions = []
+            # print(f"needed context length: {len(needed_contexts)}")
+            for context in needed_contexts:
+                # formatted_context_text = format_to_prompt(needed_bug_context_text, bug_text, context[txt_field])
+                # first_predictions.extend(do_model_beam_predictions(formatted_context_text))
+
+                first_predictions.extend(do_model_beam_predictions(context[txt_field]))
+        
         # take contexts with prediction to provide as input
         for correct_prediction_with_context in correct_predictions_with_context:
             new_input_text = f"{bug_token} {bug_part} {context_token} {correct_prediction_with_context}"
@@ -153,7 +199,7 @@ def single_iteration_beam_predict_for_bug_file(result, project, bug, bug_file_pa
             break
         while curr_queue:
             curr_prediction = curr_queue.pop(0)
-            log_iterative_prediction(project, bug, original_fix, curr_prediction, next_context, 0)
+            # log_iterative_prediction(project, bug, original_fix, curr_prediction, needed_bug_context_text, 0)
             is_fixed = is_bug_fixed(original_fix, curr_prediction)
             if is_fixed:
                 fix_bug_count += 1
@@ -168,11 +214,9 @@ def single_iteration_beam_predict_for_bug_file(result, project, bug, bug_file_pa
             not_fix_bug_contents.append(bug_content)    
     result[project][bug] = f"{fix_bug_count} / {total_bug_count}"
         
-
-
-
 def iterative_beam_predict_for_bug_file(result, project, bug, bug_file_path):
     global iterations, bug_count_to_check, number_of_improvements_after_first_iteration
+    global allow_prediction_forward
     set_prediction_files_for_iterative_beam_approach()
     file_content = get_json_data(bug_file_path)
     total_bug_count = len(file_content)
@@ -181,7 +225,13 @@ def iterative_beam_predict_for_bug_file(result, project, bug, bug_file_path):
     correct_predictions_with_context = []
     fix_bug_count = 0 
     take_first_prediction = False
-    for bug_content in file_content: 
+
+    try_fix_bug_contents = file_content
+    not_fix_bug_contents = []
+    fix_bug_contents = []
+
+    while try_fix_bug_contents:
+        bug_content = try_fix_bug_contents.pop(0)
         bug_contexts = bug_content['ctxs']
         next_context = bug_contexts[0]['txt']
         bug_part = extract_content_between(next_context, bug_token, context_token)
@@ -191,10 +241,12 @@ def iterative_beam_predict_for_bug_file(result, project, bug, bug_file_path):
         else:
             first_predictions = do_model_beam_predictions(next_context)
         # take contexts with prediction to provide as input
-        for correct_prediction_with_context in correct_predictions_with_context:
-            new_input_text = f"{bug_token} {bug_part} {context_token} {correct_prediction_with_context}"
-            new_input_predictions = do_model_beam_predictions(new_input_text)
-            first_predictions.extend(new_input_predictions)
+        
+        if allow_prediction_forward == "yes":
+            for correct_prediction_with_context in correct_predictions_with_context:
+                new_input_text = f"{bug_token} {bug_part} {context_token} {correct_prediction_with_context}"
+                new_input_predictions = do_model_beam_predictions(new_input_text)
+                first_predictions.extend(new_input_predictions)
 
         list_of_queues = initiate_list_of_queues_for_iterations()
         original_fix = bug_content['fix']
@@ -206,7 +258,7 @@ def iterative_beam_predict_for_bug_file(result, project, bug, bug_file_path):
                 break
             while curr_queue:
                 curr_prediction = curr_queue.pop(0)
-                log_iterative_prediction(project, bug, original_fix, curr_prediction, next_context, iteration)
+                # log_iterative_prediction(project, bug, original_fix, curr_prediction, next_context, iteration)
                 is_fixed = is_bug_fixed(original_fix, curr_prediction)
                 if is_fixed:
                     fix_bug_count += 1
@@ -215,10 +267,16 @@ def iterative_beam_predict_for_bug_file(result, project, bug, bug_file_path):
                     break
                 else:
                     if iteration < iterations - 1:
-                        next_context = replace_bug_context(next_context, curr_prediction)
-                        next_predictions = do_model_beam_predictions(next_context)
+                        new_input_context = update_input_with_curr_prediction(next_context, curr_prediction)
+                        next_predictions = do_model_beam_predictions(new_input_context)
                         next_predictions = next_predictions[:number_of_improvements_after_first_iteration]
                         add_predictions_to_queue(list_of_queues[iteration + 1], next_predictions)
+            if is_fixed:
+                fix_bug_contents.append(bug_content)
+                try_fix_bug_contents.extend(not_fix_bug_contents)
+                not_fix_bug_contents = []
+            else:
+                not_fix_bug_contents.append(bug_content)     
     result[project][bug] = f"{fix_bug_count} / {total_bug_count}"
 
 def iterative_predict_for_bug_file(result, project, bug, bug_file_path):
@@ -286,10 +344,11 @@ def predict_for_bug_file(result, project, bug, bug_file_path):
 
 def set_prediction_files_for_iterative_beam_approach():
     global version, beam_size, iterations, model_name, bug_count_to_check, number_of_improvements_after_first_iteration, add_delete
+    global context_limit
     global prediction_file_path, prediction_log_file_path , summary_file_path
-    prediction_file_path = f"./results/prediction-{model_name}-{version}-chathuranga-beam-{beam_size}-iter-{iterations}-improv-{number_of_improvements_after_first_iteration}-checked-bug-count-{bug_count_to_check}.json"
-    prediction_log_file_path = f"./results/prediction-{model_name}-{version}-chathuranga-beam-{beam_size}-iter-{iterations}-improv-{number_of_improvements_after_first_iteration}-checked-bug-count-{bug_count_to_check}.txt"
-    summary_file_path = f"./results/prediction-{model_name}-{version}-chathuranga-beam-{beam_size}-iter-{iterations}-improv-{number_of_improvements_after_first_iteration}-checked-bug-count-{bug_count_to_check}-summary.txt"
+    prediction_file_path = f"./results/prediction-{model_name}-{version}-chathuranga-beam-{beam_size}-iter-{iterations}-improv-{number_of_improvements_after_first_iteration}-checked-bug-count-{bug_count_to_check}-context-limit-{context_limit}.json"
+    prediction_log_file_path = f"./results/prediction-{model_name}-{version}-chathuranga-beam-{beam_size}-iter-{iterations}-improv-{number_of_improvements_after_first_iteration}-checked-bug-count-{bug_count_to_check}-context-limit-{context_limit}.txt"
+    summary_file_path = f"./results/prediction-{model_name}-{version}-chathuranga-beam-{beam_size}-iter-{iterations}-improv-{number_of_improvements_after_first_iteration}-checked-bug-count-{bug_count_to_check}-context-limit-{context_limit}-summary.txt"
 
 def set_prediction_files_for_iterative_approach():
     global version, beam_size, iterations, model_name, bug_count_to_check
@@ -321,17 +380,18 @@ model = T5ForConditionalGeneration.from_pretrained(f'chathuranga-jayanath/{model
 # tokenizer = RobertaTokenizer.from_pretrained(f'Salesforce/{model_name}')
 # model = T5ForConditionalGeneration.from_pretrained(f'Salesforce/{model_name}')
 
-
-# beam_size = 2
-# iterations = 1
-# number_of_improvements_after_first_iteration = 1
-# bug_count_to_check = 1
 predict_max_length = 20
 
 cloned_projects_dir_path = "./cloned-projects"
-train_data_dir_path = "./fine-tune-train-data/set8-context-5-prompt-3"
+
+# train_data_dir_path = "./fine-tune-train-data/set12-context-all-prompt-3"
+train_data_dir_path = "./train-data/set12-context-all-prompt-3"
+# train_data_dir_path = "./fine-tune-train-data/set10-context-10-prompt-3"
 # train_data_dir_path = "./train-data/set8-prediction-token-context-5-prompt-1"
 categorized_bugs_dir_path = "./categorize-bugs"
+
+# context limit should vary in odd numbers 
+context_limit = 1
 
 json_ext = ".json"
 
@@ -340,10 +400,13 @@ prediction_log_file_path = None
 summary_file_path = None
 
 add_delete = "no"
+allow_prediction_forward = "no"
 
 pid = None
 
 defects4j_v2_bugs_path = "defects4j-v2-bugs.json"
+
+java_tokenizer = JavaTokenizer()
 
 if __name__ == "__main__":
     pid = sys.argv[1]
@@ -352,10 +415,9 @@ if __name__ == "__main__":
     number_of_improvements_after_first_iteration = int(sys.argv[4])
     bug_count_to_check = int(sys.argv[5])
     add_delete = sys.argv[6]
-
+    allow_prediction_forward = sys.argv[7]
 
     print(f"running for bugs in {pid} \nbeam size: {beam_size} \niterations: {iterations} \nimprovements after 1st iteration: {number_of_improvements_after_first_iteration} \nbug count checking: {bug_count_to_check}")
-    # bug_projects = get_list_of_dirs_in(train_data_dir_path)
 
     categorized_bugs_file_path = os.path.join(categorized_bugs_dir_path, str(bug_count_to_check) + json_ext)
     categorized_bugs_file_data = get_json_data(categorized_bugs_file_path)
@@ -393,11 +455,10 @@ if __name__ == "__main__":
             file_path = os.path.join(project_path, file)
             bug = file.split('.')[0]
             iterative_beam_predict_for_bug_file(result, pid, bug, file_path)
-            # iterative_predict_for_bug_file(result, pid, bug, file_path)
-            # predict_for_bug_file(result, pid, bug, file_path)
-            # beam_predict_for_bug_file(result, pid, bug, file_path)
+            
     print(result)
     write_json(prediction_file_path, result)
     summary = generate_summary(result)
     write_to_file(summary_file_path, summary)
    
+    
