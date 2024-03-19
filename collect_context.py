@@ -4,8 +4,7 @@ context_jar_path = "./utils/context.jar "
 prediction_token = "<extra_id_0>"
 bug_token = "[BUG]"
 context_token = "[CONTEXT]"
-context_width = 15
-full_context_size = 30
+context_width = 5
 
 def extract_startline_no(text):
     match = re.search(r'startline:(\d+)', text)
@@ -110,25 +109,74 @@ def remove_comment_lines(content_lines):
 def get_content_lines_as_string(content_lines):
     return ' '.join(content_lines)
 
-def filter_context(func_lines):
+def divide_front_line_range_into_parts(lower_bound, upper_bound, width):
+    parts = []
+    end = upper_bound
+    while end > lower_bound:
+        start = max(end - width + 1, lower_bound)
+        parts.append((start, end))
+        end -= width
+    parts.reverse() 
+    return parts
+
+def divide_back_line_range_into_parts(lower_bound, upper_bound, width):
+    parts = []
+    start = lower_bound
+    while start < upper_bound:
+        end = min(start + width - 1, upper_bound)
+        parts.append((start, end))
+        start += width
+    return parts
+
+def extract_lines(lines, line_ranges):
+    extracted_lists = []
+    for start, end in line_ranges:
+        extracted_lists.append(lines[start-1:end])  # Adjust indices to 0-based indexing
+    return extracted_lists
+
+def filter_full_file_context(file_lines):
     global context_width
+    file_start = 1
+    file_end = len(file_lines) - 1
     predicting_line_index = -1 
-    for i in range(len(func_lines)):
-        line = func_lines[i]
+    for i in range(len(file_lines)):
+        line = file_lines[i]
         if prediction_token in line:
             predicting_line_index = i 
             break 
-    estimate_start = predicting_line_index - 1 - context_width
-    estimate_end = predicting_line_index + 1 + context_width
+    estimate_start = predicting_line_index - context_width
+    estimate_end = predicting_line_index + context_width
     start_index = max(0, estimate_start) 
-    end_index = min(len(func_lines) - 1, estimate_end)
-    return func_lines[start_index:end_index + 1]
+    end_index = min(len(file_lines) - 1, estimate_end)
+
+    # from 0 to start index divide into 2xcontext width 
+    front_line_ranges = divide_front_line_range_into_parts(file_start, start_index - 1, context_width * 2)
+    back_line_ranges = divide_back_line_range_into_parts(end_index, file_end, context_width * 2)
+    # from end index to file end divide into 2xcontext width 
+    extracted_front_lines_set = extract_lines(file_lines, front_line_ranges)
+    extracted_back_lines_set = extract_lines(file_lines, back_line_ranges)
+    buggy_lines_set = [file_lines[start_index:end_index + 1]]
+    return extracted_front_lines_set + buggy_lines_set + extracted_back_lines_set
+
+def filter_context(file_lines):
+    global context_width
+    predicting_line_index = -1 
+    for i in range(len(file_lines)):
+        line = file_lines[i]
+        if prediction_token in line:
+            predicting_line_index = i 
+            break 
+    estimate_start = predicting_line_index - context_width
+    estimate_end = predicting_line_index + context_width
+    start_index = max(0, estimate_start) 
+    end_index = min(len(file_lines) - 1, estimate_end)
+    return file_lines[start_index:end_index + 1]
 
 def get_full_file_context_with_prediction_token_without_comments(file_path, start_bug_line, end_bug_line):
     file_lines = get_file_lines_with_prediction_token(file_path, start_bug_line, end_bug_line)
     file_lines_without_comment = remove_comment_lines(file_lines)
-    split_list = [get_content_lines_as_string(file_lines_without_comment[i:i+full_context_size]) for i in range(0, len(file_lines_without_comment), full_context_size)]
-    return split_list
+    filtered_content = filter_full_file_context(file_lines_without_comment)
+    return [get_content_lines_as_string(each_element) for each_element in filtered_content]
 
 def get_context_with_prediction_token_without_comments(file_path, start_bug_line, end_bug_line):
     file_lines = get_file_lines_with_prediction_token(file_path, start_bug_line, end_bug_line)
@@ -195,10 +243,7 @@ if __name__ == "__main__":
     bug_file_path = f"/home/chathuranga/Work/defects4j/cloned-projects/{pid}/{bid}/{path}"
     bug_line = 1797
 
-    # context = collect_context(bug_file_path, bug_line, bug_line)
     context = get_function_content_with_prediction_token_without_comments(bug_file_path, bug_line, bug_line)
 
-    # result = execute_find_context(bug_file_path, bug_line)
-    # finetune_result = extract_for_fine_tune(result)
     print(context)
     
